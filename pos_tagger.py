@@ -40,27 +40,44 @@ def evaluate(data, model):
     true_tag = list(data['tag'])
 
     # DEBUG
-    seq = seq[100:200]
-    true_tag = true_tag[100:200]
+    start = time.time()
+    seq = seq[:2088] 
+    true_tag = true_tag[:2088]
+    '''2088 seq len:
+    viterbi: 54 sec,  0.9549808429118773
+    beam: 26 sec, 0.9573754789272031
+    greedy: 0.59 sec, 0.9501915708812261
+    '''
     # seq = ['-DOCSTART-', 'I', 'am', 'Sam','.']
     # ['O','PRP','VBP','NNP','.']
+    ###### separated # 0.9492337164750958 for seq[:2088]
     # seq = np.array(seq)
     # seq_idx = np.where(seq=='.')
     # seq_idx = np.concatenate(([0],seq_idx[0]))
-    # res = []
+    # result = []
     # for i in range(1,len(seq_idx)):
-    #     part_seq = seq[seq_idx[i-1]:seq_idx[i]+1]
-    #     print(part_seq)
-    #     # res += model.inference(part_seq)
-    # exit()
-
-    model.inference(seq)
-    res = model.res
-    # res = model.inference(seq)
-    print('res',res)
-    print('true_tag',true_tag)
-    acc = accuracy_score(res,true_tag)
+    #     print('seq_idx[i]',seq_idx[i])
+    #     flag=False
+    #     part_seq = seq[seq_idx[i-1]+1:seq_idx[i]+1]
+    #     if part_seq[0]!= '-DOCSTART-':
+    #         part_seq = ['-DOCSTART-'] + list(part_seq)
+    #         flag = True
+    #     res = model.inference(part_seq)
+    #     if flag and i!=1:
+    #         res = res[1:]
+    #     else: 
+    #         res = res
+    #     result+=res
+    
+    # model.inference(seq)
+    # result = model.res # 0.9549808429118773 for seq[:2088]
+    result = model.inference(seq) # 0.9549808429118773 for seq[:2088]
+    # print('res',res)
+    # print('true_tag',true_tag)
+    
+    acc = accuracy_score(result,true_tag)
     print('acc',acc)
+    print('seq len:',len(seq),'time used:',time.time()-start)
     pass
 
 
@@ -72,10 +89,12 @@ class POSTagger():
         self.suf_for_noun = ['ity', 'hood', 'ment', 'al', 'ness', 'acy', 'dom', 'ling', 'ty', 'or', 'ation', 'ship', 'ry', 'ery', 'cy', 'ee', 'age', 'ist', 'ism', 'er', 'action', 'scape', 'ure', 'ion', 'ance', 'ence']
         self.suf_for_verb  = ['ify', 'fy', 'ate', 'en', 'ize', 'ise']
 
+        self.beam_k = args.beam_k
         self.ngram = args.Ngram
         self.smooth_type = args.smooth_type
         if self.smooth_type=='addk':
             self.k = 0.001 # .5? .05? .01? # bigger, then the trans/emit prob is more far from true val
+        self.k = 0.001
         if self.smooth_type=='interpolation':
             if self.ngram == '2':
                 self.lambda_coef = [0.8,0.2]
@@ -95,8 +114,13 @@ class POSTagger():
         
         """
         self.vocab, self.tag_trans_cnt, self.emit_cnt, self.tag_num, self.ngram_cnt, self.ngram_prev_cnt,self.interpolation_helper\
-                    = self.find_dicts(data) #, self.ngram_cnt, self.ngram_prev_cnt\
-                    
+                    = self.find_dicts(data) 
+        self.transition_prob_mat = self.find_transition_prob_mat()
+        self.emission_prob_mat = self.find_emission_prob_mat()
+        # print(self.find_emission_prob('O','Unitel'))
+        # exit()
+        # print(self.ngram_prev_cnt)
+        
 
     def sequence_probability(self, sequence, tags):
         """Computes the probability of a tagged sequence given the emission/transition
@@ -114,16 +138,18 @@ class POSTagger():
             - decoding with beam search
             - viterbi
         """
-
-        decode = self.viterbi_decode(sequence)
-        return []
-
-    def viterbi_decode(self,seq):
-        # seq = ['-DOCSTART-', 'I', 'am', 'Sam','.']
-    # ['O','PRP','VBP','NNP','.']
+        # decode = self.viterbi_decode(sequence)
+        decode = self.greedy_decode(sequence)
+        # decode = self.beam_search_decode(sequence)
+        return decode
+    
+    def beam_search_decode(self,seq):
+        stack = [] # states that beam search continues computing
         n = self.ngram
+        V = len(self.vocab.keys())
         tag_set = list(self.tag_num.keys())
         tag_len = len(tag_set)
+
         state_set = list(self.ngram_prev_cnt.keys())
         state_len = len(state_set)
         score_saver = np.zeros((state_len, len(seq))) # \pi(i,yi)
@@ -136,19 +162,23 @@ class POSTagger():
         # when time step = 0 
         for m in range(state_len):
             curtag = state_set[m] + (START_TAG,)
-            # if state_set[m] == (START_TAG, START_TAG):
-            #     score_saver[m][0] = 1
-            # else: 
-            #     score_saver[m][0] = 0
-            emitp = self.find_emission_prob(START_TAG,START_SYM)
-            transp = self.find_transition_prob(curtag)
-            score_saver[m][0] = math.log(emitp*transp)
-            bp_saver[m][0] = 0
+            if curtag not in self.transition_prob_mat:
+                score_saver[m][0] = float("-inf")
+            else:
+                emitp = self.find_emission_prob(START_TAG,START_SYM)
+                transp = self.find_transition_prob(curtag)
+                score_saver[m][0] = math.log(emitp*transp)
+            bp_saver[m][0] = None
+        best_state = np.where(score_saver[:,0]==max(score_saver[:,0]))[0][0]
+        stack = [state_set[best_state]]
+        # print(best_state,stack) # 0 [('O', 'O')]
 
         # when time step = 1 to n
         for i in range(1,len(seq)): # i
             curword = seq[i]
-            print(curword)
+            # print(curword)
+            if i%10000==0:
+                print(i)
             for j in range(state_len):  # yi = j
                 curtag = state_set[j]
                 maxscore = float("-inf")
@@ -156,17 +186,177 @@ class POSTagger():
                 for k in range(tag_len):
                     prevtag = tag_set[k]
                     curgram = (prevtag,)+curtag
-                    if curgram[:-1] not in state_set:
+                    if curgram[:2] not in stack:
+                        continue
+                    if curgram not in self.transition_prob_mat:
                         continue
                     prev_idx = reverse_stateset[curgram[:-1]] # y_{i-1}
                     emitp = self.find_emission_prob(curgram[-1],curword)
                     transp = self.find_transition_prob(curgram)
                     # cur_score = math.log(emitp) * math.log(transp) * score_saver[prev_idx][i-1]
+                    if emitp == 0:
+                        if curgram[-1]=='NNP':
+                            emitp = 0.9
+                        else:
+                            emitp = (self.emit_cnt[curgram[-1]][curword] + self.k) / (self.tag_num[curgram[-1]] + self.k*V)
                     cur_score = math.log(emitp*transp) + score_saver[prev_idx][i-1]
-                    # print(curgram)
                     # print('emitp',emitp,'curgram[-1]',curgram[-1],'curword',curword)
                     # print('transp',transp,'curgram',curgram)
-                    # print('cur_score',cur_score)
+                    if cur_score > maxscore:
+                        maxscore = cur_score
+                        bestprev = prev_idx # tag state can be found by state_set[prev_idx]
+                score_saver[j][i] = maxscore
+                bp_saver[j][i] = bestprev
+            score_dict = {score_saver[m][i]:m for m in range(len(score_saver))}
+            score_dict = sorted(score_dict.items(),reverse=True)
+            stack = [state_set[score_dict[0][1]],state_set[score_dict[1][1]]]
+            # break
+        # exit()
+        res = []
+        maxval = max(score_saver[:,-1])
+        row_idx = np.where(score_saver[:,-1]==maxval)[0][0]
+        cnt = len(seq)-1
+        while cnt>=0:
+            t = state_set[row_idx][-1]
+            res.append(t)
+            lastptr = bp_saver[row_idx,cnt]
+            row_idx = lastptr
+            cnt-=1
+        res = res[::-1]
+        return res
+    
+    def greedy_decode(self,seq):
+        V = len(self.vocab.keys())
+        tag_set = list(self.tag_num.keys())
+        tag_len = len(tag_set)
+
+        state_set = list(self.ngram_prev_cnt.keys())
+        state_len = len(state_set)
+        score_saver = np.zeros((1, len(seq)))[0] # \pi(i,yi)
+        # bp_saver = np.full((state_len, len(seq)),None) # back pointer (i,yi)
+        bp_saver = np.full((1, len(seq)),None)[0] # back pointer (i,yi)
+        reverse_stateset = {state_set[k]:k for k in range(state_len)}
+
+        # when time step = 0 
+        maxscore = float("-inf")
+        for m in range(state_len):
+            curtag = state_set[m] + (START_TAG,)
+            if curtag not in self.transition_prob_mat:
+                continue
+            else:
+                emitp = self.find_emission_prob(START_TAG,START_SYM)
+                transp = self.find_transition_prob(curtag)
+                score = math.log(emitp*transp)
+                if score > maxscore:
+                    maxscore = score
+                # score_saver[m][0] = math.log(emitp*transp)
+                    bp_saver[0] = m
+            score_saver[0] = maxscore
+            
+        # when time step = 1 to n
+        for i in range(1,len(seq)): # i 
+            curword = seq[i]
+            # print(curword)
+            if i%10000==0:
+                print(i)
+            # scores_ptr = {}
+            maxscore = float("-inf")
+            bestprev = None
+            for j in range(state_len):  # yi = j
+                curtag = state_set[j]        
+                
+                prevtag = state_set[bp_saver[i-1]]
+                if prevtag[1]!=curtag[0]:
+                    continue
+                curgram = (prevtag[0],)+curtag
+                if curgram not in self.transition_prob_mat:
+                    continue
+                prev_idx = reverse_stateset[curgram[1:]]
+                emitp = self.find_emission_prob(curgram[-1],curword)
+                transp = self.find_transition_prob(curgram)
+                if emitp == 0:
+                    if curgram[-1]=='NNP':
+                        emitp = 0.9
+                    else:
+                        emitp = (self.emit_cnt[curgram[-1]][curword] + self.k) / (self.tag_num[curgram[-1]] + self.k*V)
+                cur_score = math.log(emitp*transp) + score_saver[i-1]
+                if cur_score > maxscore:
+                    maxscore = cur_score
+                    bestprev = prev_idx
+            score_saver[i] = maxscore
+            bp_saver[i] = bestprev
+            # print('maxscore',maxscore,'bestprev',bestprev)
+        
+        # res = [state_set[best_last]]
+        res = [state_set[bp_saver[-1]][1]]
+        cnt = len(bp_saver)-1
+        while cnt>0:
+            t = state_set[bp_saver[cnt]]
+            res.append(t[0])
+            cnt-=1
+        # print(res)
+        res = res[::-1]
+        return res
+        
+
+
+    def viterbi_decode(self,seq):
+        # seq = ['-DOCSTART-', 'I', 'am', 'Sam','.']
+    # ['O','PRP','VBP','NNP','.']
+        n = self.ngram
+        V = len(self.vocab.keys())
+        tag_set = list(self.tag_num.keys())
+        tag_len = len(tag_set)
+
+        state_set = list(self.ngram_prev_cnt.keys())
+        state_len = len(state_set)
+        score_saver = np.zeros((state_len, len(seq))) # \pi(i,yi)
+        bp_saver = np.full((state_len, len(seq)),None) # back pointer (i,yi)
+        
+        reverse_stateset = {state_set[k]:k for k in range(state_len)}
+        # print(reverse_stateset) # -> {('VBZ', 'JJR'): 575}
+        # print(state_set[575]) # -> ('VBZ', 'JJR')
+
+        # when time step = 0 
+        for m in range(state_len):
+            curtag = state_set[m] + (START_TAG,)
+            if curtag not in self.transition_prob_mat:
+                score_saver[m][0] = float("-inf")
+            else:
+                emitp = self.find_emission_prob(START_TAG,START_SYM)
+                transp = self.find_transition_prob(curtag)
+                score_saver[m][0] = math.log(emitp*transp)
+            bp_saver[m][0] = None
+
+        # when time step = 1 to n
+        for i in range(1,len(seq)): # i
+            curword = seq[i]
+            # print(curword)
+            if i%10000==0:
+                print(i)
+            for j in range(state_len):  # yi = j
+                curtag = state_set[j]
+                maxscore = float("-inf")
+                bestprev = None
+                for k in range(tag_len):
+                    prevtag = tag_set[k]
+                    curgram = (prevtag,)+curtag
+                    # if curgram[:-1] not in state_set:
+                    #     continue
+                    if curgram not in self.transition_prob_mat:
+                        continue
+                    prev_idx = reverse_stateset[curgram[:-1]] # y_{i-1}
+                    emitp = self.find_emission_prob(curgram[-1],curword)
+                    transp = self.find_transition_prob(curgram)
+                    # cur_score = math.log(emitp) * math.log(transp) * score_saver[prev_idx][i-1]
+                    if emitp == 0:
+                        if curgram[-1]=='NNP':
+                            emitp = 0.9
+                        else:
+                            emitp = (self.emit_cnt[curgram[-1]][curword] + self.k) / (self.tag_num[curgram[-1]] + self.k*V)
+                    cur_score = math.log(emitp*transp) + score_saver[prev_idx][i-1]
+                    # print('emitp',emitp,'curgram[-1]',curgram[-1],'curword',curword)
+                    # print('transp',transp,'curgram',curgram)
                     if cur_score > maxscore:
                         maxscore = cur_score
                         bestprev = prev_idx # tag state can be found by state_set[prev_idx]
@@ -177,8 +367,7 @@ class POSTagger():
             # row_idx = np.where(score_saver[:,i]==maxval)[0]
             # lastptr = bp_saver[row_idx,i][0]
             # print(state_set[lastptr])
-            # break
-
+            
         res = []
         maxval = max(score_saver[:,-1])
         row_idx = np.where(score_saver[:,-1]==maxval)[0][0]
@@ -187,15 +376,15 @@ class POSTagger():
             # print(cnt, state_set[row_idx])
             t = state_set[row_idx][-1]
             res.append(t)
-            if t == 'O':
-                break
+            # if t == 'O':
+            #     break
             lastptr = bp_saver[row_idx,cnt]
+            # if lastptr == None:
+                # break
             row_idx = lastptr
             cnt-=1
         res = res[::-1]
-        # print(res)
-        self.res = res
-        # return res
+        return res
     
     def find_dicts(self,data): # "SS_word", "SS_Tag"
         if self.ngram == '2':
@@ -222,8 +411,6 @@ class POSTagger():
         tag_num[tags[0]] = 1
         vocab[words[0]] += 1
 
-        # ngram_cnt[tuple(['-DOCSTART-' for i in range(n)])] = 1
-        # ngram_prev_cnt[tuple(['-DOCSTART-' for i in range(n-1)])] = 1
         ngram_cnt[tuple(['O' for i in range(n)])] = 1
         ngram_prev_cnt[tuple(['O' for i in range(n-1)])] = 1
         if self.ngram >= '3':
@@ -252,7 +439,7 @@ class POSTagger():
             ngram_cnt[tuple(tmp)] += 1
             ngram_prev_cnt[tuple(tmp[:n-1])] += 1
             if self.ngram >= '3':
-                ngram_uni_cnt[tuple(tmp[-1])] += 1
+                ngram_uni_cnt[tuple([tmp[-1]])] += 1
             if self.ngram == '4':
                 ngram_bi_cnt[tuple(tmp[-2:])] += 1
 
@@ -262,42 +449,54 @@ class POSTagger():
         if self.ngram == '4':
             interpolation_helper = [ngram_uni_cnt, ngram_bi_cnt]
         return vocab, tag_trans_cnt, emit_cnt, tag_num, ngram_cnt, ngram_prev_cnt, interpolation_helper
+    
+    def find_transition_prob_mat(self):
+        transition_prob_mat = defaultdict(int) 
+        # transition_prob_mat[curgram] = x
+        trans_keys = self.ngram_cnt.keys()
+        V = len(self.vocab.keys())
+        for cur_ngram in trans_keys:
+            if self.smooth_type=='addk':
+                # transition_prob_mat[key[:-1]][key[-1]] = (self.ngram_cnt[key] + self.k) / (self.ngram_prev_cnt[key[:-1]] + self.k*V )
+                transition_prob_mat[cur_ngram] = (self.ngram_cnt[cur_ngram] + self.k) / (self.ngram_prev_cnt[cur_ngram[:-1]] + self.k*V )
+            if self.smooth_type=='interpolation':
+                if self.ngram == '2': # curgram = w_{n-1},w{n}
+                    features = np.array([self.ngram_cnt[cur_ngram]/self.ngram_prev_cnt[cur_ngram[:-1]], 
+                                        self.ngram_prev_cnt[tuple([cur_ngram[-1]])]/V ])
+                if self.ngram == '3':# curgram =w_{n-2}, w_{n-1},w{n}
+                    ngram_uni_cnt = self.interpolation_helper[0]
+                    features = np.array([self.ngram_cnt[cur_ngram]/self.ngram_prev_cnt[cur_ngram[:-1]],
+                                        self.ngram_prev_cnt[cur_ngram[1:]]/ngram_uni_cnt[cur_ngram[1:-1]],
+                                        ngram_uni_cnt[cur_ngram[-1]]/V ])
+                if self.ngram == '4': # curgram = w_{n-3}, w_{n-2}, w_{n-1},w{n}
+                    ngram_uni_cnt, ngram_bi_cnt = self.interpolation_helper
+                    features = np.array([self.ngram_cnt[cur_ngram]/self.ngram_prev_cnt[cur_ngram[:-1]],
+                                        self.ngram_prev_cnt[cur_ngram[1:]]/ngram_bi_cnt[cur_ngram[1:-1]],
+                                        ngram_bi_cnt[cur_ngram[2:]]/ngram_uni_cnt[cur_ngram[2:-1]],
+                                        ngram_uni_cnt[cur_ngram[-1]]/V ])
+                transition_prob_mat[cur_ngram] = sum(self.lambda_coef * features)
+
+        return transition_prob_mat
+
 
     def find_transition_prob(self,cur_ngram): # e.g. cur_ngram = ('NN','NP','.') for tri-gram
+        return self.transition_prob_mat[cur_ngram]
+        
+    def find_emission_prob_mat(self):
+        emission_prob_mat = defaultdict(lambda: defaultdict(int))
         V = len(self.vocab.keys())
-        if self.smooth_type=='addk':
-            res = (self.ngram_cnt[cur_ngram] + self.k) / (self.ngram_prev_cnt[cur_ngram[:-1]] + self.k*V )
-        if self.smooth_type=='interpolation':
-            if self.ngram == '2': # curgram = w_{n-1},w{n}
-                features = np.array([self.ngram_cnt[cur_ngram]/self.ngram_prev_cnt[cur_ngram[:-1]], 
-                                    self.ngram_prev_cnt[cur_ngram[-1]]/V ])
-            if self.ngram == '3':# curgram =w_{n-2}, w_{n-1},w{n}
-                ngram_uni_cnt = self.interpolation_helper[0]
-                features = np.array([self.ngram_cnt[cur_ngram]/self.ngram_prev_cnt[cur_ngram[:-1]],
-                                    self.ngram_prev_cnt[cur_ngram[1:]]/ngram_uni_cnt[cur_ngram[1:-1]],
-                                    ngram_uni_cnt[cur_ngram[-1]]/V ])
-            if self.ngram == '4': # curgram = w_{n-3}, w_{n-2}, w_{n-1},w{n}
-                ngram_uni_cnt, ngram_bi_cnt = self.interpolation_helper
-                features = np.array([self.ngram_cnt[cur_ngram]/self.ngram_prev_cnt[cur_ngram[:-1]],
-                                    self.ngram_prev_cnt[cur_ngram[1:]]/ngram_bi_cnt[cur_ngram[1:-1]],
-                                    ngram_bi_cnt[cur_ngram[2:]]/ngram_uni_cnt[cur_ngram[2:-1]],
-                                    ngram_uni_cnt[cur_ngram[-1]]/V ])
-            res = sum(self.lambda_coef * features)
-        return res
+        for tag in list(self.tag_num.keys()):
+            for word in list(self.vocab.keys()):
+                emission_prob_mat[tag][word] = (self.emit_cnt[tag][word] + self.k) / (self.tag_num[tag] + self.k*V)
+        # if word not in self.vocab:
+        #     print('self.emit_cnt[tag][word]',self.emit_cnt[tag][word])
+        #     print()
+        #     print("Unknown Word!")
+        #     exit()
+        return emission_prob_mat
         
     def find_emission_prob(self,tag,word):
-        V = len(self.vocab.keys())
-        # if self.smooth_type=='addk':
-        res = (self.emit_cnt[tag][word] + self.k) / (self.tag_num[tag] + self.k*V)
-        if word not in self.vocab:
-            print('self.emit_cnt[tag][word]',self.emit_cnt[tag][word])
-            print()
-            print("Unknown Word!")
-            exit()
-            
-        # if self.smooth_type=='interpolation': # ???
-            # res = (self.emit_cnt[tag][word]) / (self.tag_num[tag])
-        return res
+        return self.emission_prob_mat[tag][word]
 
     
 def find_conditional_window(n,i,words,win_type='t'):
@@ -328,8 +527,12 @@ if __name__ == "__main__":
     #                         help='')
     parser.add_argument('--Ngram', type=str, default='3', 
                             help='could be 2, 3, 4 for bi-, tri-, 4-gram')
-    parser.add_argument('--smooth_type', type=str, default='addk', 
+    parser.add_argument('--smooth_type', type=str, default='interpolation', 
                             help='addk, interpolation, GoodTuring, KneserNey')
+    parser.add_argument('--inference_type', type=str, default='greedy', 
+                            help='greedy, beam, viterbi')
+    parser.add_argument('--beam_k', type=int, default=2, 
+                            help='2, 3')
     args = parser.parse_args()
 
     pos_tagger = POSTagger(args)
@@ -347,12 +550,14 @@ if __name__ == "__main__":
                 print(words[i],tags[i])
     
     pos_tagger.train(train_data)
+    # print(pos_tagger.ngram_prev_cnt)
     
     # Experiment with your decoder using greedy decoding, beam search, viterbi...
 
     # Here you can also implement experiments that compare different styles of decoding,
     # smoothing, n-grams, etc.
     evaluate(dev_data, pos_tagger)
+    print()
 
     exit()
 
