@@ -41,8 +41,8 @@ def evaluate(data, model):
 
     # DEBUG
     start = time.time()
-    seq = seq[:2088] 
-    true_tag = true_tag[:2088]
+    # seq = seq[:2088] 
+    # true_tag = true_tag[:2088]
     '''2088 seq len:
     viterbi: 54 sec,  0.9549808429118773
     beam: 26 sec, 0.9573754789272031
