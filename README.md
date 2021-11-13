@@ -2,6 +2,8 @@
 
 This repo contains the implementation for a trigram part-of-speech (POS) tagger.
 
+The runtime is about 130 seconds after use NumPy arrays to do vectorized operation.
+
 ### Installation
 
 - This code was tested with Anaconda v4.10.1, Python v3.8.11. 
